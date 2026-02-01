@@ -1,0 +1,1 @@
+A ROS 2 package written in C++ that performs an integer addition operation. It accepts two integer inputs, computes their sum, and outputs the result within a simple request–response workflow. This example highlights the fundamentals of interaction and computation in ROS 2.

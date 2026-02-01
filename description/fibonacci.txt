@@ -1,0 +1,1 @@
+A ROS 2 package written in C++ that performs Fibonacci sequence computation through an interactive goal–feedback–result workflow. It calculates the Fibonacci sequence step by step, provides progress updates during execution, and returns the final computed sequence once completed.

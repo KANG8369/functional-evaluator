@@ -1,0 +1,29 @@
+
+name: fibonacci
+communication: action
+standards:
+  - "The package must use ROS 2 action communication."
+  - "Server goal validation: invalid goals are rejected immediately; valid goals start execution."
+  - "Server publishes incremental Fibonacci feedback at regular times."
+  - "Cancellation handling: if cancellation is requested and accepted, canceled goals terminate without errors."
+  - "Client submits a goal and it is accepted; callbacks are triggered."
+  - "Client prints increasing feedback sequence to the console."
+  - "Client handles result codes (succeeded, aborted, canceled) and prints the final result sequence."
+scenarios:
+  - id: valid_goal_then_cancel
+    description: "Send valid goal, observe feedback, cancel, observe canceled result."
+    steps:
+      - action_send_goal:
+          action: /fibonacci
+          type: example_interfaces/action/Fibonacci
+          goal: {"order": 10}
+          timeout_sec: 10
+          feedback: true
+      - wait_for_feedback:
+          min_messages: 1
+          timeout_sec: 5
+      - action_cancel_goal:
+          action: /fibonacci
+          timeout_sec: 5
+      - wait_for_result:
+          timeout_sec: 10

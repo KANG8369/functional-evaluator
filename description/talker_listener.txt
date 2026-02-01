@@ -1,0 +1,1 @@
+ROS 2 package in C++ that demonstrates a basic publish–subscribe communication workflow. The package should periodically create textual data, transmit it through ROS 2 communication channels, and present the received data output to confirm successful message exchange.

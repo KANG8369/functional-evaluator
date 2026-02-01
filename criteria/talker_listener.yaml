@@ -1,0 +1,17 @@
+
+name: talker_listener
+communication: topic
+standards:
+  - "Nodes must exchange messages through a common topic."
+  - "Each node must output the messages they send and receive to a log."
+  - "Talker node publishes messages at regular intervals."
+scenarios:
+  - id: basic_topic_flow
+    description: "Let talker/listener run; confirm chatter has messages."
+    steps:
+      - passive_run:
+          duration_sec: 2
+      - topic_echo_wait:
+          topic: /chatter
+          min_messages: 1
+          timeout_sec: 5

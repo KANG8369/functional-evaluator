@@ -1,0 +1,20 @@
+
+name: add_two_ints
+communication: service
+standards:
+  - "The package must use ROS 2 service communication."
+  - "Correct sums are returned for all valid integer inputs."
+  - "Service discovery and waiting: the client does not crash or hang if the server starts late."
+  - "Result validation: the client logs the returned sum to the console."
+scenarios:
+  - id: server_late_start
+    description: "Start nodes; wait for service; call once with (1,2)"
+    steps:
+      - wait_for_service:
+          service: /add_two_ints
+          timeout_sec: 5
+      - service_call:
+          service: /add_two_ints
+          type: example_interfaces/srv/AddTwoInts
+          request: "{a: 1, b: 2}"
+          timeout_sec: 5
