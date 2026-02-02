@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -18,11 +19,7 @@ from pipeline.workspace_manager import ensure_pkg_created, write_files
 from pipeline.build_runner import build_workspace
 from pipeline.runtime_executor import RuntimeExecutor
 
-
 def sanitize_pkg_name(stem: str) -> str:
-    """
-    Enforce: package name == description file stem (lowercase with underscores).
-    """
     s = (stem or "").strip().lower()
     s = re.sub(r"[^a-z0-9_]+", "_", s)
     s = re.sub(r"_+", "_", s).strip("_")
@@ -32,7 +29,6 @@ def sanitize_pkg_name(stem: str) -> str:
         s = f"pkg_{s}"
     return s
 
-
 def _log(msg: str, verbose: bool) -> None:
     if verbose:
         print(msg, flush=True)
@@ -41,12 +37,10 @@ def _log(msg: str, verbose: bool) -> None:
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-
 def _read_text(path: Path) -> str:
     if not path.exists():
         return f"(missing: {path})"
     return path.read_text(encoding="utf-8", errors="replace")
-
 
 def _attempt_dir(failed_root: Path, task_id: str, attempt: int, pkg: str) -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -54,8 +48,8 @@ def _attempt_dir(failed_root: Path, task_id: str, attempt: int, pkg: str) -> Pat
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-
-def archive_failed_attempt(
+def _log("[Orchestrator] Archiving failed build attempt...", verbose)
+                archive_failed_attempt(
     *,
     failed_root: Path,
     task_id: str,
@@ -68,14 +62,9 @@ def archive_failed_attempt(
     evaluator_outputs: Dict[str, Any],
     runtime_session_dir: Optional[Path],
 ) -> Path:
-    """
-    Requirement:
-      - Do NOT delete failed packages. Move them out of generated workspace.
-      - Save spec, prompts/feedback, build log, evaluator outputs, runtime artifacts (if any).
-    """
     d = _attempt_dir(failed_root, task_id, attempt, package_name)
 
-    # Move package out of workspace
+    # Move package out of workspace (requirement)
     pkg_src = ws_root / "src" / package_name
     pkg_dst = d / "package"
     if pkg_dst.exists():
@@ -84,10 +73,7 @@ def archive_failed_attempt(
         shutil.move(str(pkg_src), str(pkg_dst))
 
     write_json(d / "spec.json", spec_blob)
-    write_json(
-        d / "coder_prompt.json",
-        {"system": CODER_SYSTEM_PROMPT, "description_task_id": task_id, "feedback": coder_feedback},
-    )
+    write_json(d / "coder_prompt.json", {"system": CODER_SYSTEM_PROMPT, "feedback": coder_feedback})
     if build_log_text is not None:
         (d / "build_log.txt").write_text(build_log_text, encoding="utf-8")
     write_json(d / "evaluator_outputs.json", evaluator_outputs)
@@ -97,7 +83,6 @@ def archive_failed_attempt(
 
     return d
 
-
 def run_pipeline(
     *,
     project_root: Path,
@@ -105,19 +90,8 @@ def run_pipeline(
     max_attempts: int = 4,
     evaluator_max_chars: int = 20000,
     stop_on_first_fail: bool = True,
-    verbose: bool = False,
+    verbose: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Pipeline:
-      description -> coder -> materialize -> build -> runtime_smoke(scenarios) -> functional_eval -> retry
-
-    Writes:
-      reports/build_report.json
-      reports/functional_report.json
-
-    Returns:
-      (build_report, functional_report)
-    """
     description_dir = project_root / "description"
     criteria_dir = project_root / "criteria"
     ws_root = project_root / "generated_ros2_packages"
@@ -126,7 +100,6 @@ def run_pipeline(
     build_script = project_root / "scripts" / "build_ros2_ws.sh"
 
     ws_root.mkdir(parents=True, exist_ok=True)
-    (ws_root / "src").mkdir(parents=True, exist_ok=True)
     artifacts_root.mkdir(parents=True, exist_ok=True)
     failed_root.mkdir(parents=True, exist_ok=True)
     (project_root / "reports").mkdir(parents=True, exist_ok=True)
@@ -135,24 +108,18 @@ def run_pipeline(
     build_eval_chain = build_evaluator_chain(model_name="gpt-5.2")
     func_chain = build_functional_evaluator_chain(model_name="gpt-5.2")
 
-    build_report: Dict[str, Any] = {"schema_version": "build_report.v1", "run_started_at": _utc_now(), "items": []}
-    functional_report: Dict[str, Any] = {"schema_version": "functional_report.v1", "run_started_at": _utc_now(), "items": []}
+    build_report: Dict[str, Any] = {"run_started_at": _utc_now(), "items": []}
+    functional_report: Dict[str, Any] = {"run_started_at": _utc_now(), "items": []}
 
     txt_files = sorted(description_dir.glob("*.txt"))
     if not txt_files:
         raise RuntimeError(f"No description .txt files in {description_dir}")
 
     for txt in txt_files:
+        _log(f"\n=== Task: {txt.name} ===", verbose)
         task_id = txt.stem
-        expected_pkg = sanitize_pkg_name(task_id)
-
-        _log(f"\n=== Task: {txt.name} (pkg={expected_pkg}) ===", verbose)
-
+        pkg_name = sanitize_pkg_name(task_id)
         desc_text = txt.read_text(encoding="utf-8", errors="replace").strip()
-        if not desc_text:
-            build_report["items"].append({"task_id": task_id, "package_name": expected_pkg, "success": False, "reason": "empty_description"})
-            functional_report["items"].append({"task_id": task_id, "package_name": expected_pkg, "verdict": "FAIL", "reason": "empty_description"})
-            continue
 
         criteria_path = criteria_dir / f"{task_id}.yaml"
         criteria = load_criteria(criteria_path, task_id=task_id)
@@ -161,117 +128,81 @@ def run_pipeline(
         feedback = ""
         success = False
         last_error = ""
-        attempts_used = 0
-        final_verdict = "FAIL"
 
         for attempt in range(1, max_attempts + 1):
-            attempts_used = attempt
-            evaluator_outputs: Dict[str, Any] = {}
-
-            _log(f"[Orchestrator] Attempt {attempt}/{max_attempts} pkg={expected_pkg}", verbose)
-
-            # 1) Coder
+            _log(f"[Orchestrator] Attempt {attempt}/{max_attempts} pkg={pkg_name}", verbose)
             _log("[Orchestrator] 1) Coder generating package spec...", verbose)
-            try:
-                spec = generate_package_spec(coder_chain, desc_text, feedback=feedback)
-            except Exception as e:
-                last_error = f"coder_failed: {e}"
-                feedback = "Coder failed to produce a valid structured spec. Output must match schema."
-                _log(f"[Orchestrator] ❌ {last_error}", verbose)
+            spec = generate_package_spec(coder_chain, desc_text, feedback=feedback)
+
+            _log(f"[Orchestrator] Coder returned package_name={spec.package_name} files={len(spec.files)}", verbose)
+
+            # enforce naming
+            if spec.package_name.strip() != pkg_name:
+                feedback = f"PACKAGE NAME MUST BE '{pkg_name}'. You returned '{spec.package_name}'. Fix."
+                last_error = "package_name mismatch"
                 continue
 
-            _log(f"[Orchestrator]   ↳ Coder returned package_name={spec.package_name} files={len(spec.files)}", verbose)
-
-            # Enforce package name == task_id stem
-            if spec.package_name.strip() != expected_pkg:
-                last_error = f"package_name_mismatch: expected={expected_pkg} got={spec.package_name}"
-                feedback = f"PACKAGE NAME MUST EQUAL '{expected_pkg}'. You returned '{spec.package_name}'. Fix."
-                _log(f"[Orchestrator] ❌ {last_error}", verbose)
-                continue
-
-            # 2) Materialize
             _log("[Orchestrator] 2) Materializing workspace/package...", verbose)
-            try:
-                pkg_root = ensure_pkg_created(ws_root=ws_root, package_name=expected_pkg, ros_distro=ros_distro)
-                tuple_files = [(f.path, f.content) for f in spec.files]
-                write_files(pkg_root=pkg_root, files=tuple_files)
-            except Exception as e:
-                last_error = f"materialize_failed: {e}"
-                feedback = f"Workspace writing failed: {e}. Ensure file paths are valid relative POSIX paths."
-                _log(f"[Orchestrator] ❌ {last_error}", verbose)
-                continue
+            pkg_root = ensure_pkg_created(ws_root=ws_root, package_name=pkg_name, ros_distro=ros_distro)
+            write_files(pkg_root=pkg_root, files=[(f.path, f.content) for f in spec.files])
 
-            # 3) Build
             _log("[Orchestrator] 3) Building workspace...", verbose)
             rc, build_log_path = build_workspace(ws_root=ws_root, ros_distro=ros_distro, build_script=build_script)
             build_log_text = _read_text(build_log_path)
 
             if rc != 0:
-                last_error = f"build_failed_rc={rc}"
                 _log(f"[Orchestrator] ❌ BUILD FAILED rc={rc}. Log: {build_log_path}", verbose)
-                tail = build_log_text[-3000:] if len(build_log_text) > 3000 else build_log_text
-                _log("[Orchestrator] --- build log tail (last ~3k chars) ---\n" + tail + "\n--- end ---", verbose)
-
-                # Build evaluator
-                _log("[Orchestrator] 3.1) Build Evaluator analyzing log...", verbose)
-                log_tail = build_log_text[-evaluator_max_chars:] if len(build_log_text) > evaluator_max_chars else build_log_text
+                tail_for_console = build_log_text[-3000:] if len(build_log_text) > 3000 else build_log_text
+                _log("[Orchestrator] --- build log tail (last ~3k chars) ---\n" + tail_for_console + "\n--- end ---", verbose)
+                tail = build_log_text[-evaluator_max_chars:] if len(build_log_text) > evaluator_max_chars else build_log_text
+                evaluator_output = {}
                 try:
-                    be_res = evaluate_build_log(build_eval_chain, log_tail)
-                    evaluator_outputs["build_evaluator"] = be_res.model_dump() if hasattr(be_res, "model_dump") else asdict(be_res)  # type: ignore
-                    feedback = (
-                        "BUILD FAILED. Apply these fixes strictly.\n"
-                        f"ROOT CAUSE:\n{be_res.root_cause}\n\n"
-                        f"ACTIONABLE FIXES:\n{be_res.actionable_fixes}\n"
-                    )
+                    eval_res = evaluate_build_log(build_eval_chain, tail)
+                    evaluator_output = eval_res.model_dump() if hasattr(eval_res, "model_dump") else asdict(eval_res)
                 except Exception as e:
-                    evaluator_outputs["build_evaluator_error"] = str(e)
-                    feedback = "Build failed. Fix compile/CMake/package.xml issues using the build log."
+                    evaluator_output = {"error": f"build evaluator failed: {e}"}
 
-                # Archive failed attempt (moves package out of ws)
                 _log("[Orchestrator] Archiving failed build attempt...", verbose)
-                spec_blob = spec.model_dump() if hasattr(spec, "model_dump") else asdict(spec)  # type: ignore
                 archive_failed_attempt(
                     failed_root=failed_root,
                     task_id=task_id,
                     attempt=attempt,
                     ws_root=ws_root,
-                    package_name=expected_pkg,
-                    spec_blob=spec_blob,
+                    package_name=pkg_name,
+                    spec_blob=spec.model_dump(),
                     coder_feedback=feedback,
                     build_log_text=build_log_text,
-                    evaluator_outputs=evaluator_outputs,
+                    evaluator_outputs={"build": evaluator_output},
                     runtime_session_dir=None,
                 )
-                _log("[Orchestrator] Retrying...\n", verbose)
+
+                feedback = (
+                    "BUILD FAILED. Apply these fixes strictly.\n"
+                    f"ROOT CAUSE:\n{evaluator_output.get('root_cause','')}\n\n"
+                    f"ACTIONABLE FIXES:\n{evaluator_output.get('actionable_fixes','')}\n"
+                )
+                _log("[Orchestrator] Retrying with build-evaluator feedback...", verbose)
+                last_error = f"build failed rc={rc}"
                 continue
 
+            # runtime + scenarios (STOP_ON_FIRST_FAIL)
             _log("[Orchestrator] ✅ BUILD OK. Proceeding to runtime + scenarios...", verbose)
 
-            # 4) Runtime per scenario (1 scenario = 1 runtime session)
-            run_id = make_run_id()
             scenario_failed = False
+            failed_scenario_id: Optional[str] = None
             last_session_dir: Optional[Path] = None
-            last_runtime_report: Optional[Dict[str, Any]] = None
-            last_scenario_report: Optional[Dict[str, Any]] = None
+            last_func_output: Optional[Dict[str, Any]] = None
 
             for scenario in criteria.scenarios:
-                scenario_id = scenario["id"]
-                _log(f"[Orchestrator] 4) Runtime session start: scenario_id={scenario_id}", verbose)
-
-                paths = session_paths(
-                    artifacts_root=artifacts_root,
-                    run_id=run_id,
-                    package_name=expected_pkg,
-                    scenario_id=scenario_id,
-                )
-                last_session_dir = paths.session_dir
-
-                # snapshots for reproducibility
-                write_text(paths.session_dir / "criteria_snapshot.yaml", criteria_yaml_text)
+                _log(f"[Orchestrator] 4) Runtime session start: scenario_id={scenario['id']}", verbose)
+                run_id = make_run_id()
+                paths = session_paths(artifacts_root=artifacts_root, run_id=run_id, package_name=pkg_name, scenario_id=scenario["id"])
+                # snapshots
                 write_text(paths.session_dir / "description_snapshot.txt", desc_text)
+                write_text(paths.session_dir / "criteria_snapshot.yaml", criteria_yaml_text)
 
                 executor = RuntimeExecutor(
-                    package_name=expected_pkg,
+                    package_name=pkg_name,
                     scenario=scenario,
                     workspace_root=ws_root,
                     artifacts_root=artifacts_root,
@@ -279,152 +210,99 @@ def run_pipeline(
                     ros_distro=ros_distro,
                     startup_grace_sec=2,
                     teardown_grace_sec=3,
-                    verbose=verbose,
                 )
                 runtime_report, scenario_report = executor.run()
-                last_runtime_report, last_scenario_report = runtime_report, scenario_report
+                _log(f"[Orchestrator] Runtime status={runtime_report.get('runtime_status',{}).get('status')} Scenario status={scenario_report.get('scenario_status',{}).get('status')}", verbose)
+                last_session_dir = paths.session_dir
 
-                run_status = (runtime_report.get("runtime_status", {}) or {}).get("status", "UNKNOWN")
-                scen_status = (scenario_report.get("scenario_status", {}) or {}).get("status", "UNKNOWN")
+                scen_status = scenario_report.get("scenario_status", {}).get("status", "FAIL_STEP_ERROR")
+                run_status = runtime_report.get("runtime_status", {}).get("status", "UNKNOWN_ERROR")
 
-                _log(f"[Orchestrator]   ↳ runtime_status={run_status} scenario_status={scen_status}", verbose)
-
-                if run_status != "OK" or scen_status != "PASS":
+                if scen_status != "PASS" or run_status != "OK":
+                    _log(f"[Orchestrator] ❌ RUNTIME/SCENARIO FAILED: runtime={run_status} scenario={scen_status}", verbose)
                     scenario_failed = True
-                    last_error = f"runtime_or_scenario_failed: runtime={run_status} scenario={scen_status} scenario_id={scenario_id}"
-                    evaluator_outputs["runtime_executor"] = {"runtime_status": run_status, "scenario_status": scen_status}
-                    _log(f"[Orchestrator] ❌ {last_error}", verbose)
+                    failed_scenario_id = scenario["id"]
+                    last_error = f"runtime/scenario failed: runtime={run_status}, scenario={scen_status}"
+                    break
 
-                    if stop_on_first_fail:
-                        break
+                # Functional evaluation per scenario (this is where criteria expectations matter)
+                probes_text = ""
+                for p in sorted((paths.session_dir / "probes").glob("*.txt")):
+                    probes_text += f"## {p.name}\n{_read_text(p)}\n\n"
 
-            if scenario_failed:
-                # Archive failed runtime attempt (moves package out of ws)
-                _log("[Orchestrator] Archiving failed runtime/scenario attempt...", verbose)
-                spec_blob = spec.model_dump() if hasattr(spec, "model_dump") else asdict(spec)  # type: ignore
-                archive_failed_attempt(
-                    failed_root=failed_root,
-                    task_id=task_id,
-                    attempt=attempt,
-                    ws_root=ws_root,
-                    package_name=expected_pkg,
-                    spec_blob=spec_blob,
-                    coder_feedback=feedback,
-                    build_log_text=build_log_text,
-                    evaluator_outputs=evaluator_outputs,
-                    runtime_session_dir=last_session_dir,
-                )
-                feedback = f"RUNTIME/SCENARIO FAILED: {last_error}. Fix node runtime behavior and/or interfaces."
-                _log("[Orchestrator] Retrying...\n", verbose)
-                continue
+                node_logs_text = ""
+                for p in sorted((paths.session_dir / "node_logs").glob("*.txt")):
+                    node_logs_text += f"## {p.name}\n{_read_text(p)}\n\n"
 
-            # 5) Functional evaluation (LLM) using LAST scenario session evidence
-            if last_session_dir is None:
-                last_error = "no_session_dir_for_functional_eval"
-                _log(f"[Orchestrator] ❌ {last_error}", verbose)
-                feedback = "No runtime artifacts were produced; cannot do functional evaluation."
-                continue
-
-            _log("[Orchestrator] 5) Functional evaluation: collecting evidence...", verbose)
-
-            runtime_report_json = _read_text(last_session_dir / "runtime_report.json")
-            scenario_report_json = _read_text(last_session_dir / "scenario_report.json")
-
-            # probes
-            probes_dir = last_session_dir / "probes"
-            probes_text_parts = []
-            if probes_dir.exists():
-                for p in sorted(probes_dir.glob("*.txt")):
-                    probes_text_parts.append(f"## {p.name}\n{_read_text(p)}")
-            probes_text = "\n\n".join(probes_text_parts) if probes_text_parts else "(no probes)"
-
-            # node logs
-            node_logs_dir = last_session_dir / "node_logs"
-            node_logs_parts = []
-            if node_logs_dir.exists():
-                for p in sorted(node_logs_dir.glob("*.txt")):
-                    t = _read_text(p)
-                    if len(t) > 6000:
-                        t = "[NOTE] truncated to last 6000 chars\n\n" + t[-6000:]
-                    node_logs_parts.append(f"## {p.name}\n{t}")
-            node_logs_text = "\n\n".join(node_logs_parts) if node_logs_parts else "(no node logs)"
-
-            _log("[Orchestrator] 5.1) Calling Functional Evaluator (LLM)...", verbose)
-            try:
+                _log("[Orchestrator] 5) Functional evaluation: assembling evidence...", verbose)
+                _log("[Orchestrator] 5.1) Calling Functional Evaluator (LLM)...", verbose)
                 func_res = evaluate_functional(
                     func_chain,
                     criteria_yaml=criteria_yaml_text,
-                    runtime_report_json=runtime_report_json,
-                    scenario_report_json=scenario_report_json,
+                    runtime_report_json=json.dumps(runtime_report, ensure_ascii=False, indent=2),
+                    scenario_report_json=json.dumps(scenario_report, ensure_ascii=False, indent=2),
                     probes_text=probes_text,
                     node_logs_text=node_logs_text,
                 )
-                func_out = func_res.model_dump() if hasattr(func_res, "model_dump") else asdict(func_res)  # type: ignore
-            except Exception as e:
-                func_out = {
-                    "verdict": "FAIL",
-                    "failed_criteria": ["functional_evaluator_crash"],
-                    "root_cause": str(e),
-                    "actionable_fixes": ["Fix functional evaluator implementation or evidence formatting."],
-                }
+                func_out = func_res.model_dump() if hasattr(func_res, "model_dump") else func_res.dict()
+                last_func_output = func_out
+                write_json(paths.session_dir / "functional_report.json", func_out)
+                _log(f"[Orchestrator] Functional verdict={func_out.get('verdict')} failed_criteria={func_out.get('failed_criteria', [])}", verbose)
 
-            write_json(last_session_dir / "functional_report.json", func_out)
-            verdict = func_out.get("verdict", "FAIL")
-            _log(f"[Orchestrator]   ↳ Functional verdict={verdict} failed_criteria={func_out.get('failed_criteria', [])}", verbose)
+                functional_report["items"].append({
+                    "task_id": task_id,
+                    "package_name": pkg_name,
+                    "attempt": attempt,
+                    "scenario_id": scenario["id"],
+                    "verdict": func_out.get("verdict"),
+                    "failed_criteria": func_out.get("failed_criteria", []),
+                })
 
-            if verdict != "PASS":
-                last_error = "functional_eval_failed"
-                evaluator_outputs["functional_evaluator"] = func_out
+                if func_out.get("verdict") != "PASS":
+                    _log("[Orchestrator] ❌ FUNCTIONAL EVALUATION FAILED. Archiving & retrying...", verbose)
+                    scenario_failed = True
+                    failed_scenario_id = scenario["id"]
+                    last_error = f"functional failed: {failed_scenario_id}"
+                    break
 
-                _log("[Orchestrator] ❌ Functional evaluation failed. Archiving & retrying...", verbose)
-                spec_blob = spec.model_dump() if hasattr(spec, "model_dump") else asdict(spec)  # type: ignore
+                if stop_on_first_fail and scenario_failed:
+                    break
+
+            if scenario_failed:
+                _log(f"[Orchestrator] Attempt failed: {last_error}", verbose)
+                _log("[Orchestrator] Archiving failed build attempt...", verbose)
                 archive_failed_attempt(
                     failed_root=failed_root,
                     task_id=task_id,
                     attempt=attempt,
                     ws_root=ws_root,
-                    package_name=expected_pkg,
-                    spec_blob=spec_blob,
+                    package_name=pkg_name,
+                    spec_blob=spec.model_dump(),
                     coder_feedback=feedback,
                     build_log_text=build_log_text,
-                    evaluator_outputs=evaluator_outputs,
+                    evaluator_outputs={"functional": last_func_output or {}, "error": last_error},
                     runtime_session_dir=last_session_dir,
                 )
-
-                # feedback to coder
                 feedback = (
-                    "FUNCTIONAL EVALUATION FAILED.\n"
-                    f"ROOT CAUSE:\n{func_out.get('root_cause','')}\n\n"
-                    "ACTIONABLE FIXES:\n" + "\n".join(f"- {x}" for x in func_out.get("actionable_fixes", []))
+                    "FUNCTIONAL/RUNTIME FAILED. Fix behavior and/or scenario satisfaction.\n"
+                    f"Last error: {last_error}\n"
+                    f"Last functional output: {json.dumps(last_func_output or {}, ensure_ascii=False, indent=2)}\n"
                 )
-                _log("[Orchestrator] Retrying...\n", verbose)
                 continue
 
-            # Success
+            # success
+            _log("[Orchestrator] ✅ Task SUCCESS (all scenarios PASS).", verbose)
             success = True
-            final_verdict = "PASS"
             last_error = ""
-            _log("[Orchestrator] ✅ Task SUCCESS (build + runtime + functional PASS).", verbose)
             break
 
-        build_report["items"].append(
-            {
-                "task_id": task_id,
-                "package_name": expected_pkg,
-                "success": success,
-                "attempts_used": attempts_used,
-                "last_error": last_error,
-                "workspace_path": str(ws_root),
-                "build_log_path": str(ws_root / "build_logs" / "build.txt"),
-            }
-        )
-        functional_report["items"].append(
-            {"task_id": task_id, "package_name": expected_pkg, "verdict": final_verdict, "attempts_used": attempts_used, "last_error": last_error}
-        )
+        build_report["items"].append({
+            "task_id": task_id,
+            "package_name": pkg_name,
+            "success": success,
+            "last_error": last_error,
+        })
 
-    # write reports
-    reports_dir = project_root / "reports"
-    write_json(reports_dir / "build_report.json", build_report)
-    write_json(reports_dir / "functional_report.json", functional_report)
-
+    build_report["run_finished_at"] = _utc_now()
+    functional_report["run_finished_at"] = _utc_now()
     return build_report, functional_report

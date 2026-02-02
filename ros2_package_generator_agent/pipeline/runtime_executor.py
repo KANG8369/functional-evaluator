@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -8,11 +9,10 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pipeline.scenario_runner import ScenarioRunner
 from pipeline.artifacts import write_json, write_meta_json
-
 
 class RuntimeExecutor:
     """Launches all nodes in a package concurrently, runs ONE scenario session, captures logs and probes."""
@@ -50,108 +50,17 @@ class RuntimeExecutor:
         self.processes: List[subprocess.Popen] = []
         self.executables: List[Dict[str, Any]] = []
 
-    def _log(self, msg: str) -> None:
-        if self.verbose:
-            print(f"[RuntimeExecutor] {msg}", flush=True)
-
-    def _utc_now(self) -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-    def _alloc_ros_domain_id(self) -> int:
-        # randomized to reduce collisions if multiple runs
-        return int(uuid.uuid4().int % 101) + 10
-
-    def _ros_env_prefix(self) -> str:
-        ros_setup = f"/opt/ros/{self.ros_distro}/setup.bash"
-        ws_setup = str(self.workspace_root / "install" / "setup.bash")
-        # Do not use 'set -u' here to avoid AMENT_TRACE_SETUP_FILES unbound issues.
-        return f"set -e; source {ros_setup}; source {ws_setup}; export ROS_DOMAIN_ID={self.ros_domain_id}"
-
-    def _discover_executables(self) -> List[Tuple[str, str]]:
-        # returns list of (pkg, exe)
-        cmd = f"{self._ros_env_prefix()}; ros2 pkg executables {self.package_name}"
-        proc = subprocess.run(["bash", "-lc", cmd], text=True, capture_output=True)
-        if proc.returncode != 0:
-            raise RuntimeError(f"ros2 pkg executables failed: {proc.stderr.strip()}")
-        pairs: List[Tuple[str, str]] = []
-        for line in (proc.stdout or "").splitlines():
-            parts = line.strip().split()
-            if len(parts) >= 2:
-                pairs.append((parts[0], parts[1]))
-        return pairs
-
-    def _launch_nodes(self) -> None:
-        pairs = self._discover_executables()
-        if not pairs:
-            raise RuntimeError(f"No executables found for package '{self.package_name}'.")
-        for pkg, exe in pairs:
-            log_path = self.node_logs_dir / f"{exe}.txt"
-            # Use script to capture terminal-like output
-            cmd = (
-                f"{self._ros_env_prefix()}; "
-                f"script -q -c \"ros2 run {pkg} {exe}\" \"{log_path.as_posix()}\""
-            )
-            p = subprocess.Popen(["bash", "-lc", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.processes.append(p)
-            self.executables.append({
-                "package": pkg,
-                "executable": exe,
-                "cmd": f"ros2 run {pkg} {exe}",
-                "log_file": str(log_path),
-                "pid": p.pid,
-            })
-
-    def _collect_probes(self) -> None:
-        self.probes_dir.mkdir(parents=True, exist_ok=True)
-
-        def run_probe(name: str, cmd: str) -> None:
-            full = f"{self._ros_env_prefix()}; {cmd}"
-            proc = subprocess.run(["bash", "-lc", full], text=True, capture_output=True)
-            out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-            (self.probes_dir / name).write_text(out, encoding="utf-8")
-
-        run_probe("node_list.txt", "ros2 node list")
-        run_probe("topic_list.txt", "ros2 topic list")
-        run_probe("service_list.txt", "ros2 service list")
-        run_probe("action_list.txt", "ros2 action list")
-
-    def _teardown(self) -> None:
-        # SIGINT then SIGKILL
-        for p in self.processes:
-            if p.poll() is None:
-                try:
-                    os.kill(p.pid, signal.SIGINT)
-                except Exception:
-                    pass
-        t_end = time.time() + float(self.teardown_grace_sec)
-        while time.time() < t_end:
-            if all(p.poll() is not None for p in self.processes):
-                return
-            time.sleep(0.1)
-        for p in self.processes:
-            if p.poll() is None:
-                try:
-                    os.kill(p.pid, signal.SIGKILL)
-                except Exception:
-                    pass
-
-    def _fill_exit_info(self) -> None:
-        for exe in self.executables:
-            pid = exe.get("pid")
-            proc = next((p for p in self.processes if p.pid == pid), None)
-            if proc is None:
-                continue
-            exe["returncode"] = proc.poll()
-
     def run(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         started_at = self._utc_now()
-        self._log(f"Run start run_id={self.run_id} pkg={self.package_name} scenario={self.scenario_id} ROS_DOMAIN_ID={self.ros_domain_id}")
 
+        self._log(f"Run start run_id={self.run_id} pkg={self.package_name} scenario={self.scenario_id} ROS_DOMAIN_ID={self.ros_domain_id}")
         self.probes_dir.mkdir(parents=True, exist_ok=True)
         self.node_logs_dir.mkdir(parents=True, exist_ok=True)
+
         write_meta_json(session_dir=self.session_dir, ros_distro=self.ros_distro, ros_domain_id=self.ros_domain_id, ws_root=self.workspace_root)
 
         runtime_status = "OK"
+            self._log("Runtime status OK")
         runtime_error = ""
 
         try:
@@ -161,6 +70,7 @@ class RuntimeExecutor:
             time.sleep(self.startup_grace_sec)
 
             self._log("Executing scenario steps...")
+
             runner = ScenarioRunner(
                 run_id=self.run_id,
                 package_name=self.package_name,
@@ -174,7 +84,7 @@ class RuntimeExecutor:
             self._log("Collecting ROS graph probes...")
             self._collect_probes()
 
-            # crash detection
+            # if any process died early, mark crash
             if any(p.poll() is not None for p in self.processes):
                 runtime_status = "CRASH_DETECTED"
 
@@ -232,6 +142,104 @@ class RuntimeExecutor:
             },
             "environment": {"ros_distro": self.ros_distro, "ros_domain_id": self.ros_domain_id},
         }
-        write_json(self.session_dir / "runtime_report.json", runtime_report)
 
+        write_json(self.session_dir / "runtime_report.json", runtime_report)
         return runtime_report, scenario_report
+
+    # ---------------- internals ----------------
+
+    def _launch_nodes(self) -> None:
+        execs = self._discover_executables()
+        if not execs:
+            raise RuntimeError(f"No executables discovered for package: {self.package_name}")
+
+        for exe in execs:
+            log_path = self.node_logs_dir / f"{exe}.txt"
+            cmd = (
+                f"{self._ros_env_prefix()} "
+                f"script -q -c \"ros2 run {self.package_name} {exe}\" "
+                f"{log_path}"
+            )
+            proc = subprocess.Popen(
+                ["bash", "-lc", cmd],
+                preexec_fn=os.setsid,
+                env=self._runtime_env(),
+            )
+            self.processes.append(proc)
+            self.executables.append({
+                "name": exe,
+                "pid": proc.pid,
+                "log_path": str(log_path),
+                "start_ok": True,
+                "exit": {"exited": False, "exit_code": None, "signal": None, "ended_early": False},
+            })
+
+    def _teardown(self) -> None:
+        # SIGINT
+        for proc in self.processes:
+            if proc.poll() is None:
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+
+        time.sleep(self.teardown_grace_sec)
+
+        # SIGKILL
+        for proc in self.processes:
+            if proc.poll() is None:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+    def _fill_exit_info(self) -> None:
+        for exe, proc in zip(self.executables, self.processes):
+            rc = proc.poll()
+            exe["exit"] = {
+                "exited": rc is not None,
+                "exit_code": rc,
+                "signal": None,
+                "ended_early": False,
+            }
+
+    def _collect_probes(self) -> None:
+        probes = {
+            "ros_node_list.txt": "ros2 node list",
+            "ros_topic_list.txt": "ros2 topic list",
+            "ros_service_list.txt": "ros2 service list",
+            "ros_action_list.txt": "ros2 action list",
+        }
+        for fname, cmd in probes.items():
+            out, _ = self._run_cmd(cmd, timeout=5)
+            (self.probes_dir / fname).write_text(out, encoding="utf-8")
+
+    def _discover_executables(self) -> List[str]:
+        out, rc = self._run_cmd(f"ros2 pkg executables {self.package_name}", timeout=5)
+        if rc != 0:
+            return []
+        return [line.split()[-1] for line in out.splitlines() if line.strip()]
+
+    def _run_cmd(self, cmd: str, timeout: int) -> Tuple[str, int]:
+        full_cmd = f"{self._ros_env_prefix()} {cmd}"
+        proc = subprocess.run(
+            ["bash", "-lc", full_cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=self._runtime_env(),
+        )
+        return (proc.stdout or "") + (proc.stderr or ""), proc.returncode
+
+    def _runtime_env(self) -> Dict[str, str]:
+        env = os.environ.copy()
+        env["ROS_DOMAIN_ID"] = str(self.ros_domain_id)
+        return env
+
+    def _ros_env_prefix(self) -> str:
+        return (
+            f"source /opt/ros/{self.ros_distro}/setup.bash && "
+            f"source {self.workspace_root}/install/setup.bash &&"
+        )
+
+    @staticmethod
+    def _alloc_ros_domain_id() -> int:
+        return int(uuid.uuid4().int % 200) + 1
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
