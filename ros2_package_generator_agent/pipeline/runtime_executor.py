@@ -28,7 +28,6 @@ class RuntimeExecutor:
         ros_distro: str = "humble",
         startup_grace_sec: int = 2,
         teardown_grace_sec: int = 3,
-        verbose: bool = True,
     ) -> None:
         self.package_name = package_name
         self.scenario = scenario
@@ -39,7 +38,6 @@ class RuntimeExecutor:
         self.ros_distro = ros_distro
         self.startup_grace_sec = startup_grace_sec
         self.teardown_grace_sec = teardown_grace_sec
-        self.verbose = verbose
 
         self.ros_domain_id = self._alloc_ros_domain_id()
 
@@ -52,24 +50,17 @@ class RuntimeExecutor:
 
     def run(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         started_at = self._utc_now()
-
-        self._log(f"Run start run_id={self.run_id} pkg={self.package_name} scenario={self.scenario_id} ROS_DOMAIN_ID={self.ros_domain_id}")
         self.probes_dir.mkdir(parents=True, exist_ok=True)
         self.node_logs_dir.mkdir(parents=True, exist_ok=True)
 
         write_meta_json(session_dir=self.session_dir, ros_distro=self.ros_distro, ros_domain_id=self.ros_domain_id, ws_root=self.workspace_root)
 
         runtime_status = "OK"
-            self._log("Runtime status OK")
         runtime_error = ""
 
         try:
-            self._log("Launching nodes (concurrent)...")
             self._launch_nodes()
-            self._log(f"Startup grace: {self.startup_grace_sec}s")
             time.sleep(self.startup_grace_sec)
-
-            self._log("Executing scenario steps...")
 
             runner = ScenarioRunner(
                 run_id=self.run_id,
@@ -77,11 +68,9 @@ class RuntimeExecutor:
                 scenario=self.scenario,
                 artifacts_dir=self.session_dir,
                 ros_env_prefix=self._ros_env_prefix(),
-                verbose=self.verbose,
             )
             scenario_report = runner.run()
 
-            self._log("Collecting ROS graph probes...")
             self._collect_probes()
 
             # if any process died early, mark crash
@@ -108,7 +97,6 @@ class RuntimeExecutor:
             write_json(self.session_dir / "scenario_report.json", scenario_report)
 
         finally:
-            self._log("Tearing down (SIGINT -> SIGKILL)...")
             self._teardown()
             self._fill_exit_info()
 

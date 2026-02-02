@@ -29,11 +29,6 @@ def sanitize_pkg_name(stem: str) -> str:
         s = f"pkg_{s}"
     return s
 
-def _log(msg: str, verbose: bool) -> None:
-    if verbose:
-        print(msg, flush=True)
-
-
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -48,8 +43,7 @@ def _attempt_dir(failed_root: Path, task_id: str, attempt: int, pkg: str) -> Pat
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-def _log("[Orchestrator] Archiving failed build attempt...", verbose)
-                archive_failed_attempt(
+def archive_failed_attempt(
     *,
     failed_root: Path,
     task_id: str,
@@ -90,7 +84,6 @@ def run_pipeline(
     max_attempts: int = 4,
     evaluator_max_chars: int = 20000,
     stop_on_first_fail: bool = True,
-    verbose: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     description_dir = project_root / "description"
     criteria_dir = project_root / "criteria"
@@ -116,7 +109,6 @@ def run_pipeline(
         raise RuntimeError(f"No description .txt files in {description_dir}")
 
     for txt in txt_files:
-        _log(f"\n=== Task: {txt.name} ===", verbose)
         task_id = txt.stem
         pkg_name = sanitize_pkg_name(task_id)
         desc_text = txt.read_text(encoding="utf-8", errors="replace").strip()
@@ -130,11 +122,7 @@ def run_pipeline(
         last_error = ""
 
         for attempt in range(1, max_attempts + 1):
-            _log(f"[Orchestrator] Attempt {attempt}/{max_attempts} pkg={pkg_name}", verbose)
-            _log("[Orchestrator] 1) Coder generating package spec...", verbose)
             spec = generate_package_spec(coder_chain, desc_text, feedback=feedback)
-
-            _log(f"[Orchestrator] Coder returned package_name={spec.package_name} files={len(spec.files)}", verbose)
 
             # enforce naming
             if spec.package_name.strip() != pkg_name:
@@ -142,18 +130,13 @@ def run_pipeline(
                 last_error = "package_name mismatch"
                 continue
 
-            _log("[Orchestrator] 2) Materializing workspace/package...", verbose)
             pkg_root = ensure_pkg_created(ws_root=ws_root, package_name=pkg_name, ros_distro=ros_distro)
             write_files(pkg_root=pkg_root, files=[(f.path, f.content) for f in spec.files])
 
-            _log("[Orchestrator] 3) Building workspace...", verbose)
             rc, build_log_path = build_workspace(ws_root=ws_root, ros_distro=ros_distro, build_script=build_script)
             build_log_text = _read_text(build_log_path)
 
             if rc != 0:
-                _log(f"[Orchestrator] ❌ BUILD FAILED rc={rc}. Log: {build_log_path}", verbose)
-                tail_for_console = build_log_text[-3000:] if len(build_log_text) > 3000 else build_log_text
-                _log("[Orchestrator] --- build log tail (last ~3k chars) ---\n" + tail_for_console + "\n--- end ---", verbose)
                 tail = build_log_text[-evaluator_max_chars:] if len(build_log_text) > evaluator_max_chars else build_log_text
                 evaluator_output = {}
                 try:
@@ -162,7 +145,6 @@ def run_pipeline(
                 except Exception as e:
                     evaluator_output = {"error": f"build evaluator failed: {e}"}
 
-                _log("[Orchestrator] Archiving failed build attempt...", verbose)
                 archive_failed_attempt(
                     failed_root=failed_root,
                     task_id=task_id,
@@ -181,20 +163,16 @@ def run_pipeline(
                     f"ROOT CAUSE:\n{evaluator_output.get('root_cause','')}\n\n"
                     f"ACTIONABLE FIXES:\n{evaluator_output.get('actionable_fixes','')}\n"
                 )
-                _log("[Orchestrator] Retrying with build-evaluator feedback...", verbose)
                 last_error = f"build failed rc={rc}"
                 continue
 
             # runtime + scenarios (STOP_ON_FIRST_FAIL)
-            _log("[Orchestrator] ✅ BUILD OK. Proceeding to runtime + scenarios...", verbose)
-
             scenario_failed = False
             failed_scenario_id: Optional[str] = None
             last_session_dir: Optional[Path] = None
             last_func_output: Optional[Dict[str, Any]] = None
 
             for scenario in criteria.scenarios:
-                _log(f"[Orchestrator] 4) Runtime session start: scenario_id={scenario['id']}", verbose)
                 run_id = make_run_id()
                 paths = session_paths(artifacts_root=artifacts_root, run_id=run_id, package_name=pkg_name, scenario_id=scenario["id"])
                 # snapshots
@@ -212,14 +190,12 @@ def run_pipeline(
                     teardown_grace_sec=3,
                 )
                 runtime_report, scenario_report = executor.run()
-                _log(f"[Orchestrator] Runtime status={runtime_report.get('runtime_status',{}).get('status')} Scenario status={scenario_report.get('scenario_status',{}).get('status')}", verbose)
                 last_session_dir = paths.session_dir
 
                 scen_status = scenario_report.get("scenario_status", {}).get("status", "FAIL_STEP_ERROR")
                 run_status = runtime_report.get("runtime_status", {}).get("status", "UNKNOWN_ERROR")
 
                 if scen_status != "PASS" or run_status != "OK":
-                    _log(f"[Orchestrator] ❌ RUNTIME/SCENARIO FAILED: runtime={run_status} scenario={scen_status}", verbose)
                     scenario_failed = True
                     failed_scenario_id = scenario["id"]
                     last_error = f"runtime/scenario failed: runtime={run_status}, scenario={scen_status}"
@@ -234,8 +210,6 @@ def run_pipeline(
                 for p in sorted((paths.session_dir / "node_logs").glob("*.txt")):
                     node_logs_text += f"## {p.name}\n{_read_text(p)}\n\n"
 
-                _log("[Orchestrator] 5) Functional evaluation: assembling evidence...", verbose)
-                _log("[Orchestrator] 5.1) Calling Functional Evaluator (LLM)...", verbose)
                 func_res = evaluate_functional(
                     func_chain,
                     criteria_yaml=criteria_yaml_text,
@@ -247,7 +221,6 @@ def run_pipeline(
                 func_out = func_res.model_dump() if hasattr(func_res, "model_dump") else func_res.dict()
                 last_func_output = func_out
                 write_json(paths.session_dir / "functional_report.json", func_out)
-                _log(f"[Orchestrator] Functional verdict={func_out.get('verdict')} failed_criteria={func_out.get('failed_criteria', [])}", verbose)
 
                 functional_report["items"].append({
                     "task_id": task_id,
@@ -259,7 +232,6 @@ def run_pipeline(
                 })
 
                 if func_out.get("verdict") != "PASS":
-                    _log("[Orchestrator] ❌ FUNCTIONAL EVALUATION FAILED. Archiving & retrying...", verbose)
                     scenario_failed = True
                     failed_scenario_id = scenario["id"]
                     last_error = f"functional failed: {failed_scenario_id}"
@@ -269,8 +241,6 @@ def run_pipeline(
                     break
 
             if scenario_failed:
-                _log(f"[Orchestrator] Attempt failed: {last_error}", verbose)
-                _log("[Orchestrator] Archiving failed build attempt...", verbose)
                 archive_failed_attempt(
                     failed_root=failed_root,
                     task_id=task_id,
@@ -291,7 +261,6 @@ def run_pipeline(
                 continue
 
             # success
-            _log("[Orchestrator] ✅ Task SUCCESS (all scenarios PASS).", verbose)
             success = True
             last_error = ""
             break

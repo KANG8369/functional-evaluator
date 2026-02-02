@@ -22,7 +22,6 @@ class ScenarioRunner:
         scenario: Dict[str, Any],
         artifacts_dir: Path,
         ros_env_prefix: str,
-        verbose: bool = True,
     ) -> None:
         self.run_id = run_id
         self.package_name = package_name
@@ -30,12 +29,7 @@ class ScenarioRunner:
         self.scenario_id = scenario["id"]
         self.artifacts_dir = artifacts_dir
         self.ros_env_prefix = ros_env_prefix
-        self.verbose = verbose
         self.steps_report: List[Dict[str, Any]] = []
-
-    def _log(self, msg: str) -> None:
-        if self.verbose:
-            print(f\"[ScenarioRunner] {msg}\", flush=True)
         # state between steps (e.g., goal_id)
         self.state: Dict[str, Any] = {}
 
@@ -46,12 +40,8 @@ class ScenarioRunner:
         error_type = None
         message = ""
 
-        self._log(f"Start scenario_id={self.scenario_id}, steps={len(self.scenario['steps'])}")
-
         for idx, step in enumerate(self.scenario["steps"]):
             step_type, body = self._parse_step(step)
-            self._log(f"Step {idx}: {step_type}")
-
             report = self._execute_step(idx, step_type, body)
             self.steps_report.append(report)
 
@@ -60,7 +50,6 @@ class ScenarioRunner:
                 failed_step_index = idx
                 error_type = report["result"]["status"]
                 message = report["result"].get("error", "")
-                self._log(f"FAIL_FAST at step {idx}: {report['result']}")
                 break
 
         ended_at = self._utc_now()
@@ -78,7 +67,6 @@ class ScenarioRunner:
             },
             "timing": {"started_at_utc": started_at, "ended_at_utc": ended_at},
         }
-        self._log(f"Scenario status: {scenario_report['scenario_status']['status']}")
         self._write_json("scenario_report.json", scenario_report)
         return scenario_report
 

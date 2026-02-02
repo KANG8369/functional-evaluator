@@ -11,7 +11,6 @@ from pipeline.orchestrator import run_pipeline
 def main() -> None:
     parser = argparse.ArgumentParser(description="ROS2 package generator pipeline")
     parser.add_argument("--max-attempts", type=int, default=4)
-    parser.add_argument("--verbose", action="store_true", help="Print realtime progress logs")
     parser.add_argument("--evaluator-max-chars", type=int, default=20000)
     parser.add_argument("--stop-on-first-fail", action="store_true", default=True)
     args = parser.parse_args()
@@ -28,7 +27,6 @@ def main() -> None:
         max_attempts=args.max_attempts,
         evaluator_max_chars=args.evaluator_max_chars,
         stop_on_first_fail=True,
-        verbose=args.verbose,
     )
 
     reports_dir = project_root / "reports"
